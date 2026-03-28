@@ -48,6 +48,12 @@ export class BehaviorSettings extends Adw.PreferencesGroup {
 		});
 		this.add(syncPrimary);
 
+		const trackPrimary = new Adw.SwitchRow({
+			title: _('Track Primary Clipboard'),
+			subtitle: _('Add mouse selections to the clipboard history'),
+		});
+		this.add(trackPrimary);
+
 		const updateDateOnCopy = new Adw.SwitchRow({
 			title: _('Update Date on Copy'),
 			subtitle: _('Update the copied date of clipboard items when selected from clipboard history'),
@@ -62,6 +68,7 @@ export class BehaviorSettings extends Adw.PreferencesGroup {
 		settings.bind('protect-pinned', protectPinned, 'active', Gio.SettingsBindFlags.DEFAULT);
 		settings.bind('protect-tagged', protectTagged, 'active', Gio.SettingsBindFlags.DEFAULT);
 		settings.bind('sync-primary', syncPrimary, 'active', Gio.SettingsBindFlags.DEFAULT);
+		settings.bind('track-primary', trackPrimary, 'active', Gio.SettingsBindFlags.DEFAULT);
 		settings.bind('update-date-on-copy', updateDateOnCopy, 'active', Gio.SettingsBindFlags.DEFAULT);
 	}
 }

@@ -72,6 +72,7 @@ export class ClipboardManager extends GObject.Object {
 	private pasteSignalId: number = -1;
 
 	private prevClipboard: [ContentType, string] | null = null;
+	private prevPrimary: string | null = null;
 
 	constructor(
 		private ext: CopyousExtension,
@@ -99,6 +100,11 @@ export class ClipboardManager extends GObject.Object {
 		const checksum = contentChecksum(content);
 		if (!checksum) return;
 		this.prevClipboard = [content.type, checksum];
+
+		// prevent sync-primary from creating a duplicate entry
+		if (content.type === ContentType.Text) {
+			this.prevPrimary = checksum;
+		}
 
 		// Text
 		if (content.type === ContentType.Text) {
@@ -227,6 +233,51 @@ export class ClipboardManager extends GObject.Object {
 		return !this.ext.settings.get_boolean('incognito');
 	}
 
+	private async primaryOwnerChanged(selectionSource: Meta.SelectionSource): Promise<void> {
+		// only save text from PRIMARY (mouse selections are always text)
+		const mimeTypes = selectionSource.get_mimetypes();
+		const textMimeType = MimeTypes.Text.find((value) => mimeTypes.includes(value));
+		if (!textMimeType) return;
+
+		// use incognito check
+		if (!this.shouldSave(selectionSource)) return;
+
+		const source = await selectionSource.read_async(textMimeType, null);
+		const out = Gio.MemoryOutputStream.new_resizable();
+		await out.splice_async(
+			source,
+			Gio.OutputStreamSpliceFlags.CLOSE_SOURCE | Gio.OutputStreamSpliceFlags.CLOSE_TARGET,
+			GLib.PRIORITY_DEFAULT,
+			null,
+		);
+		const bytes = out.steal_as_bytes().toArray();
+		const text = new TextDecoder().decode(bytes);
+		if (!text || !text.trim()) return;
+
+		// avoid duplicates
+		const checksum = GLib.compute_checksum_for_string(GLib.ChecksumType.MD5, text, text.length);
+		if (!checksum || checksum === this.prevPrimary) return;
+
+		// also check against last clipboard copy to prevent duplicate entries
+		// many apps set both selections at CTRL+C
+		if (this.prevClipboard) {
+			const [prevType, prevChecksum] = this.prevClipboard;
+			if (prevType === ContentType.Text && prevChecksum === checksum) return;
+		}
+
+		this.prevPrimary = checksum;
+
+		const content: ClipboardContent = { type: ContentType.Text, text };
+		const res = await this.convertContent(content);
+		if (!res) return;
+
+		const [type, entryText, metadata] = res;
+		const entry = await this.tracker.insert(type, entryText, metadata);
+		if (entry) {
+			this.emit('clipboard', entry);
+		}
+	}
+
 	private async ownerChanged(
 		_selection: Meta.Selection,
 		selectionType: Meta.SelectionType,
@@ -234,6 +285,13 @@ export class ClipboardManager extends GObject.Object {
 	) {
 		try {
 			if (selectionSource === null) return;
+
+			if (selectionType === Meta.SelectionType.SELECTION_PRIMARY) {
+				if (!this.ext.settings.get_boolean('track-primary')) return;
+				await this.primaryOwnerChanged(selectionSource);
+				return;
+			}
+
 			if (selectionType !== Meta.SelectionType.SELECTION_CLIPBOARD) return;
 
 			const content = await this.getContent(selectionSource);

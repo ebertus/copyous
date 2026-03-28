@@ -160,6 +160,10 @@
 			<default>false</default>
 			<summary>Also copy clipboard items to the primary clipboard</summary>
 		</key>
+		<key name="track-primary" type="b">
+			<default>false</default>
+			<summary>Track the primary clipboard (mouse selection) and add it to the clipboard history</summary>
+		</key>
 		<key name="update-date-on-copy" type="b">
 			<default>true</default>
 			<summary>Update the copied date of clipboard items when selected from clipboard history</summary>
