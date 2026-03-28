@@ -73,6 +73,8 @@ export class ClipboardManager extends GObject.Object {
 
 	private prevClipboard: [ContentType, string] | null = null;
 	private prevPrimary: string | null = null;
+	private primaryDebounceId: number = -1;
+	private pendingPrimaryText: string | null = null;
 
 	constructor(
 		private ext: CopyousExtension,
@@ -92,6 +94,7 @@ export class ClipboardManager extends GObject.Object {
 
 		if (this.signalId >= 0) this.selection.disconnect(this.signalId);
 		if (this.pasteSignalId >= 0) GLib.source_remove(this.pasteSignalId);
+		if (this.primaryDebounceId >= 0) GLib.source_remove(this.primaryDebounceId);
 		this.signalId = -1;
 		this.pasteSignalId = -1;
 	}
@@ -233,8 +236,18 @@ export class ClipboardManager extends GObject.Object {
 		return !this.ext.settings.get_boolean('incognito');
 	}
 
-	private async primaryOwnerChanged(selectionSource: Meta.SelectionSource): Promise<void> {
-		// only save text from PRIMARY (mouse selections are always text)
+	private primaryOwnerChanged(selectionSource: Meta.SelectionSource): void {
+		// cancel running timer
+		if (this.primaryDebounceId >= 0) {
+			GLib.source_remove(this.primaryDebounceId);
+			this.primaryDebounceId = -1;
+		}
+
+		// read content immediately as long selectionSource is valid
+		this.readPrimary(selectionSource).catch((e) => this.ext.logger.error(e));
+	}
+
+	private async readPrimary(selectionSource: Meta.SelectionSource): Promise<void> {
 		const mimeTypes = selectionSource.get_mimetypes();
 		const textMimeType = MimeTypes.Text.find((value) => mimeTypes.includes(value));
 		if (!textMimeType) return;
@@ -242,19 +255,45 @@ export class ClipboardManager extends GObject.Object {
 		// use incognito check
 		if (!this.shouldSave(selectionSource)) return;
 
-		const source = await selectionSource.read_async(textMimeType, null);
-		const out = Gio.MemoryOutputStream.new_resizable();
-		await out.splice_async(
-			source,
-			Gio.OutputStreamSpliceFlags.CLOSE_SOURCE | Gio.OutputStreamSpliceFlags.CLOSE_TARGET,
-			GLib.PRIORITY_DEFAULT,
-			null,
-		);
-		const bytes = out.steal_as_bytes().toArray();
-		const text = new TextDecoder().decode(bytes);
+		// read content as long as source is alive
+		let text: string;
+		try {
+			const source = await selectionSource.read_async(textMimeType, null);
+			const out = Gio.MemoryOutputStream.new_resizable();
+			await out.splice_async(
+				source,
+				Gio.OutputStreamSpliceFlags.CLOSE_SOURCE | Gio.OutputStreamSpliceFlags.CLOSE_TARGET,
+				GLib.PRIORITY_DEFAULT,
+				null,
+			);
+			text = new TextDecoder().decode(out.steal_as_bytes().toArray());
+		} catch (e) {
+			// source got invalid (e.g. window closed) - avoid crash
+			return;
+		}
+
 		if (!text || !text.trim()) return;
 
-		// avoid duplicates
+		if (this.primaryDebounceId >= 0) {
+			GLib.source_remove(this.primaryDebounceId);
+			this.primaryDebounceId = -1;
+		}
+
+		// save text und write to history after debounce
+		this.pendingPrimaryText = text;
+
+		this.primaryDebounceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+			this.primaryDebounceId = -1;
+			const pending = this.pendingPrimaryText;
+			this.pendingPrimaryText = null;
+			if (pending) {
+				this.savePrimary(pending).catch((e) => this.ext.logger.error(e));
+			}
+			return GLib.SOURCE_REMOVE;
+		});
+	}
+
+	private async savePrimary(text: string): Promise<void> {
 		const checksum = GLib.compute_checksum_for_string(GLib.ChecksumType.MD5, text, text.length);
 		if (!checksum || checksum === this.prevPrimary) return;
 
