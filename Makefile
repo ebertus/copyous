@@ -67,6 +67,9 @@ lint-fix:
 	pnpm exec eslint src --ext .ts --fix
 	pnpm exec prettier src resources/css --write
 
+shexli: $(DIST_ZIP)
+	uv run python -m shexli $< --format json | pnpm tsx ./scripts/shexli/transform-output.ts
+
 # Localization
 resources/po/main.pot: $(SRC)
 	find src -name '*.ts' \
@@ -75,13 +78,14 @@ resources/po/main.pot: $(SRC)
 		--copyright-holder="Copyous" \
 		--package-name="Copyous" \
 		--language="javascript" \
+		--sort-by-file \
 		--output="$@"
 
 POT := resources/po/main.pot
 pot: $(POT)
 
 resources/po/%.po: resources/po/main.pot
-	msgmerge --backup=off -N -U $@ $<
+	msgmerge --backup=off --update --no-fuzzy-matching --sort-by-file $@ $<
 
 PO := $(wildcard resources/po/*.po)
 po: $(PO)
@@ -93,6 +97,7 @@ check-pot:
 		--copyright-holder="Copyous" \
 		--package-name="Copyous" \
 		--language="javascript" \
+		--sort-by-file \
 		--output=- \
 	| diff -q -I '^"POT-Creation-Date: .*' - resources/po/main.pot
 
@@ -100,19 +105,26 @@ check-po:
 	find resources/po -name '*.po' -exec msgcmp --use-untranslated {} resources/po/main.pot \;
 
 # Copy metadata
+VERSION ?= $(shell git describe --tags --dirty | sed -E 's/^v//;s/-g([0-9a-f]{7})/+\1/')
+
 $(DIST_DIR)/metadata.json: resources/metadata.json | $(DIST_DIR)
-	cp $< $@
+	jq '."version-name" = "$(VERSION)"' $< > $@
 
 # TypeScript
 $(DIST_DIR)/extension.js: $(SRC) tsconfig.json | $(DIST_DIR)
+ifeq ($(RELEASE),1)
 	pnpm exec tsc
 	@touch $@
-ifeq ($(RELEASE),1)
 # Remove code blocks commented with /* DEBUG-ONLY */ or lines ending with // DEBUG-ONLY
 	find $(@D) -name '*.js' -exec perl -0777 -i -pe 's/^(\s*)\/\* DEBUG-ONLY \*\/(?:.|\n)*?^\1\}|\/\/ DEBUG-ONLY.*\n.*$$//gm' {} \;
 # Format code to make it easier for EGO reviewers
 	-pnpm exec eslint $(DIST_DIR) --config ./format.eslint.config.js --fix --cache --cache-location=$(DIST_DIR)/.eslintcache
 	pnpm exec prettier $(DIST_DIR) --ignore-path= --log-level=warn --write --cache --cache-location=$(DIST_DIR)/.prettiercache
+else
+	pnpm exec tsc --sourceMap --sourceRoot src
+	@touch $@
+# Move source maps to subdirectory
+	rsync -rv --include '*/' --exclude 'sourcemaps/**' --include '*.js.map' --exclude '*' --prune-empty-dirs --remove-source-files dist/ dist/sourcemaps/
 endif
 
 TSC := $(DIST_DIR)/extension.js
